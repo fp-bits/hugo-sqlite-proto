@@ -2,15 +2,16 @@
 """tools/index.py — content/**/*.md → SQLite (solo en build) → JSON estático.
 
 Filosofía Unix: hace UNA cosa. Lee Markdown, rellena build/site.db y la
-consulta con SQL para exportar dos ficheros:
+consulta con SQL para exportar tres ficheros:
 
   static/search.json  → lo consume static/search.js en el navegador
   data/tags.json      → lo consume Hugo en layouts/index.html
+  data/stats.json     → lo consume Hugo en layouts/partials/footer.html
 
 La base de datos NO se despliega: public/ contiene solo ficheros estáticos.
 
-Solo biblioteca estándar (sqlite3, json, re, pathlib). Estilo funcional:
-funciones puras para parsear; los efectos (disco, SQL) quedan al final.
+Solo biblioteca estándar (argparse, json, re, sqlite3, sys, pathlib). Estilo
+funcional: funciones puras para parsear; los efectos (disco, SQL) quedan al final.
 
 Límites (a propósito, KISS): front matter YAML con pares `clave: valor` y
 listas en línea `tags: [a, b]`. Nada de TOML (+++) ni listas multilínea.
@@ -18,6 +19,7 @@ listas en línea `tags: [a, b]`. Nada de TOML (+++) ni listas multilínea.
 Docs: https://docs.python.org/3/library/sqlite3.html
       https://www.sqlite.org/json1.html
 """
+import argparse
 import json
 import re
 import sqlite3
@@ -29,6 +31,7 @@ CONTENT = Path("content")
 DB = Path("build/site.db")
 OUT_SEARCH = Path("static/search.json")
 OUT_TAGS = Path("data/tags.json")
+OUT_STATS = Path("data/stats.json")
 
 SCHEMA = """
 CREATE TABLE posts (
@@ -43,17 +46,25 @@ CREATE TABLE tags (
   tag TEXT NOT NULL,
   PRIMARY KEY (url, tag)
 );
+CREATE TABLE words (
+  url TEXT PRIMARY KEY REFERENCES posts(url),
+  n   INTEGER NOT NULL
+);
 """
 
 # SQL produce directamente el JSON (extensión json1 de SQLite).
 Q_SEARCH = """
 SELECT json_group_array(json_object(
   'url', url, 'title', title, 'date', date, 'summary', summary,
-  'tags', json(tags), 'text', body))
+  'tags', json(tags), 'text', body,
+  'words', words, 'reading_minutes', reading_minutes))
 FROM (
   SELECT p.*,
+         COALESCE(w.n, 0) AS words,
+         MAX(1, (COALESCE(w.n, 0) + 199) / 200) AS reading_minutes,
          (SELECT json_group_array(tag) FROM tags t WHERE t.url = p.url) AS tags
   FROM posts p
+  LEFT JOIN words w ON w.url = p.url
   ORDER BY date DESC, title
 )
 """
@@ -64,6 +75,15 @@ SELECT json_group_array(json_object('tag', tag, 'total', total))
 FROM (
   SELECT tag, COUNT(*) AS total FROM tags GROUP BY tag ORDER BY total DESC, tag
 )
+"""
+
+# Estadísticas globales de palabras a partir de la tabla words.
+Q_STATS = """
+SELECT json_object(
+  'total_words', COALESCE(SUM(n), 0),
+  'total_posts', COUNT(*)
+)
+FROM words
 """
 
 # --- funciones puras ---------------------------------------------------------
@@ -105,6 +125,10 @@ def plain(markdown):
     return reduce(step, CLEANERS, markdown).strip()
 
 
+def word_count(text):
+    return len(text.split())
+
+
 def shorten(text, n=160):
     return text if len(text) <= n else text[:n].rsplit(" ", 1)[0] + "…"
 
@@ -129,12 +153,23 @@ def read_page(path):
         "tags": tags if isinstance(tags, list) else [tags],
         "draft": meta.get("draft", False) is True,
         "text": text,
+        "words": word_count(text),
     }
 
 
-def read_all():
+def read_all(include_drafts=False):
     files = (p for p in sorted(CONTENT.rglob("*.md")) if p.name != "_index.md")
-    return [page for page in map(read_page, files) if not page["draft"]]
+    return [page for page in map(read_page, files)
+            if include_drafts or not page["draft"]]
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Indexa content/**/*.md en SQLite y exporta JSON para Hugo.")
+    parser.add_argument(
+        "-D", "--drafts", action="store_true",
+        help="incluye borradores (draft: true), equivalente a hugo -D")
+    return parser.parse_args(argv)
 
 
 # --- efectos: disco y SQL ----------------------------------------------------
@@ -150,6 +185,8 @@ def build_db(pages):
     con.executemany(
         "INSERT OR IGNORE INTO tags(url, tag) VALUES (?, ?)",
         [(p["url"], t) for p in pages for t in p["tags"]])
+    con.executemany(
+        "INSERT INTO words(url, n) VALUES (:url, :words)", pages)
     con.commit()
     return con
 
@@ -160,14 +197,18 @@ def export(con, query, out):
 
 
 def main():
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    args = parse_args()
     if not CONTENT.is_dir():
         sys.exit("index.py: ejecútalo desde la raíz del repo (make index)")
-    pages = read_all()
+    pages = read_all(include_drafts=args.drafts)
     con = build_db(pages)
     export(con, Q_SEARCH, OUT_SEARCH)
     export(con, Q_TAGS, OUT_TAGS)
+    export(con, Q_STATS, OUT_STATS)
     con.close()
-    print(f"index: {len(pages)} páginas → {OUT_SEARCH}, {OUT_TAGS}")
+    print(f"index: {len(pages)} páginas → {OUT_SEARCH}, {OUT_TAGS}, {OUT_STATS}")
 
 
 if __name__ == "__main__":

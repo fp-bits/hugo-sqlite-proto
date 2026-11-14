@@ -17,16 +17,17 @@ Ese comando detecta cambios en `content/` y `layouts/` y reconstruye el sitio au
 ```
 content/*.md --> tools/index.py --> build/site.db --+--> static/search.json --> navegador (search.js)
  (Markdown)       (parsea + INSERT)   (SQLite, local) +--> data/tags.json -----> Hugo (layouts/index.html)
+                                                      +--> data/stats.json ----> Hugo (layouts/partials/footer.html)
 
                                      hugo --> public/   <- lo único que se despliega
 ```
 
-`build/`, `static/search.json` y `data/tags.json` están en `.gitignore`: se **regeneran** en cada build.
+`build/`, `static/search.json`, `data/tags.json` y `data/stats.json` están en `.gitignore`: se **regeneran** en cada build.
 
 ## Requisitos
 
 - [Hugo](https://gohugo.io/installation/) (versión estándar, no hace falta *extended*)
-- Python 3.8+ (solo biblioteca estándar: [`sqlite3`](https://docs.python.org/3/library/sqlite3.html), `json`, `re`)
+- Python 3.8+ (solo biblioteca estándar: [`sqlite3`](https://docs.python.org/3/library/sqlite3.html), `json`, `re`, `argparse`)
 - `make`
 
 ## Uso
@@ -38,6 +39,12 @@ make build    # índice + hugo --gc --minify  → public/
 make check    # valida que los JSON generados son JSON válido
 make clean
 make check-invites   # [profesor] invitaciones de colaborador pendientes (gh CLI)
+```
+
+Para indexar también los borradores (`draft: true`) al usar `hugo server -D`:
+
+```bash
+python3 tools/index.py --drafts
 ```
 
 ## Estructura
@@ -53,9 +60,9 @@ Makefile            index · build · serve · check · clean
 
 ## Dónde mirar
 
-- **SQL como generador de JSON**: `Q_SEARCH` y `Q_TAGS` en `tools/index.py`
-  ([JSON1](https://www.sqlite.org/json1.html), `GROUP BY`, `COUNT`).
-- **Datos de build en plantillas**: `hugo.Data.tags` en `layouts/index.html`
+- **SQL como generador de JSON**: `Q_SEARCH`, `Q_TAGS` y `Q_STATS` en `tools/index.py`
+  ([JSON1](https://www.sqlite.org/json1.html), `GROUP BY`, `COUNT`, `SUM`).
+- **Datos de build en plantillas**: `hugo.Data.tags` en `layouts/index.html` y `hugo.Data.stats` en `layouts/partials/footer.html`
   ([Hugo data](https://gohugo.io/content-management/data-sources/)).
 - **Búsqueda sin servidor**: `static/search.js` ([`fetch`](https://developer.mozilla.org/es/docs/Web/API/Fetch_API),
   [`filter`](https://developer.mozilla.org/es/docs/Web/JavaScript/Reference/Global_Objects/Array/filter),
@@ -69,6 +76,14 @@ Makefile            index · build · serve · check · clean
 3. Añade una tabla `words(url, n)` con el número de palabras de cada post y muestra el total en el pie.
 4. Cambia la búsqueda para ordenar los resultados por número de coincidencias (sigue siendo una función pura).
 5. Despliega `public/` con `rsync` a tu VPS o con GitHub Pages. ¿Qué proceso corre en el servidor? (Ninguno de tuyos.)
+
+## Cambios realizados
+
+- Añadido el post `content/posts/consultas-sql-en-sqlite.md` con la etiqueta `sql` para comprobar la actualización de `data/tags.json`.
+- Añadido el flag `--drafts` (`-D`) en `tools/index.py`. Antes no aparecían los borradores en la búsqueda porque `read_all()` filtraba `not page["draft"]` siempre; ahora se pueden incluir al lanzar el script manualmente junto a `hugo server -D`.
+- Añadida la tabla `words(url, n)` en SQLite, el conteo de palabras en `tools/index.py` y la consulta `Q_STATS`, que genera `data/stats.json`. El parcial `layouts/partials/footer.html` lee `hugo.Data.stats` para mostrar el total de palabras en el pie.
+- Modificado `static/search.js` para contar cuántas veces aparecen los términos buscados (`countTerm` y `score`) y ordenar los resultados de mayor a menor número de coincidencias.
+- Como extra, `Q_SEARCH` cruza `posts` con `words` para calcular los minutos estimados de lectura (`reading_minutes`) y mostrarlos en los resultados de búsqueda y en `layouts/_default/single.html`.
 
 ## Límites a propósito (KISS)
 
